@@ -1,0 +1,200 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 1. GBM exact solution and schemes
+
+def gbm_exact(T, W_T, lam, mu, x0=1.0):
+    #Exact GBM solution at time T given W_T.
+    return x0 * np.exp((lam - 0.5 * mu**2) * T + mu * W_T)
+
+
+def euler_maruyama(lam, mu, T, h, n_paths, x0=1.0, seed=None):
+    #Euler–Maruyama paths for GBM, returning X_T and the W_T used
+    if seed is not None:
+        np.random.seed(seed)
+    n_steps = int(T / h)
+    dW = np.sqrt(h) * np.random.randn(n_paths, n_steps)
+    X = np.full(n_paths, x0, dtype=float)
+    for k in range(n_steps):
+        X += lam * X * h + mu * X * dW[:, k]
+    W_T = dW.sum(axis=1)
+    return X, W_T
+
+
+def milstein(lam, mu, T, h, n_paths, x0=1.0, seed=None):
+    #Milstein scheme for GBM, returning X_T and the W_T used
+    if seed is not None:
+        np.random.seed(seed)
+    n_steps = int(T / h)
+    dW = np.sqrt(h) * np.random.randn(n_paths, n_steps)
+    X = np.full(n_paths, x0, dtype=float)
+    for k in range(n_steps):
+        dWk = dW[:, k]
+        X *= (
+            1.0
+            + lam * h
+            + mu * dWk
+            + 0.5 * mu**2 * (dWk**2 - h)
+        )
+    W_T = dW.sum(axis=1)
+    return X, W_T
+
+# 2. Strong & weak convergence tests
+
+def convergence_test(scheme, scheme_name, lam, mu, T=1.0,
+                     hs=None, n_paths=50000, x0=1.0):
+    
+    #scheme: function(lam, mu, T, h, n_paths, x0, seed) -> (X_T_scheme, W_T)
+    
+    if hs is None:
+        hs = np.array([2.0**(-k) for k in range(1, 7)])  # steps: 1/2,1/4,...,1/64
+
+    strong_errors = []
+    weak_errors = []
+
+    for h in hs:
+        X_num, W_T = scheme(lam, mu, T, h, n_paths, x0=x0, seed=123)
+        X_exact = gbm_exact(T, W_T, lam, mu, x0=x0)
+
+        # Strong error: E|X_T - X_T^h|
+        strong_err = np.mean(np.abs(X_exact - X_num))
+        strong_errors.append(strong_err)
+
+        # Weak error: |E[X_T] - E[X_T^h]|
+        exact_mean = np.exp(lam * T)  # E[X_T] for GBM with X0=1
+        weak_err = np.abs(exact_mean - np.mean(X_num))
+        weak_errors.append(weak_err)
+
+        print(f"{scheme_name}: h={h:.4f}, strong_err={strong_err:.3e}, weak_err={weak_err:.3e}")
+
+    strong_errors = np.array(strong_errors)
+    weak_errors = np.array(weak_errors)
+
+    # Fit slopes in log-log scale
+    slope_strong, _ = np.polyfit(np.log(hs), np.log(strong_errors), 1)
+    slope_weak, _ = np.polyfit(np.log(hs), np.log(weak_errors), 1)
+
+    print(f"\nEstimated strong order for {scheme_name}: {slope_strong:.3f}")
+    print(f"Estimated weak   order for {scheme_name}: {slope_weak:.3f}\n")
+
+    # Optional plots
+    plt.figure()
+    plt.loglog(hs, strong_errors, "o-", label="strong error")
+    plt.loglog(hs, weak_errors, "s-", label="weak error")
+    plt.loglog(hs, hs**0.5 * strong_errors[0]/(hs[0]**0.5), "k--", label="h^{1/2}")
+    plt.loglog(hs, hs * strong_errors[0]/(hs[0]), "k-.", label="h^1")
+    plt.gca().invert_xaxis()
+    plt.xlabel("stepsize h")
+    plt.ylabel("error")
+    plt.title(f"Convergence of {scheme_name}")
+    plt.legend()
+    plt.grid(True, which="both", ls=":")
+    plt.show()
+
+
+# 3. Milstein mean-square stability
+
+
+def milstein_step_factor_m2(lam, mu, h):
+    
+    # E[G_h^2] for Milstein GBM:
+    # G_h = 1 + lam*h + mu*dW + 0.5*mu^2*(dW^2 - h), dW~N(0,h).
+    
+    return 1 + (2 * lam + mu**2) * h + (lam**2 + 0.5 * mu**4) * h**2
+
+
+def milstein_stability_sim(lam, mu, h, T_long=100.0,
+                           n_paths=2000, x0=1.0, seed=None):
+    # Simulate long-time mean-square behavior for Milstein
+    if seed is not None:
+        np.random.seed(seed)
+    n_steps = int(T_long / h)
+    X = np.full(n_paths, x0, dtype=float)
+    msq = np.zeros(n_steps + 1)
+    msq[0] = np.mean(X**2)
+    times = np.linspace(0.0, T_long, n_steps + 1)
+
+    for k in range(1, n_steps + 1):
+        dW = np.sqrt(h) * np.random.randn(n_paths)
+        X *= (1 + lam * h + mu * dW + 0.5 * mu**2 * (dW**2 - h))
+        msq[k] = np.mean(X**2)
+
+    return times, msq
+
+
+def demo_mean_square_stability():
+    lam, mu = -3.0, np.sqrt(3.0)
+    boundary = 2.0 / 9.0
+    print(f"Theoretical mean-square stability boundary for Milstein: h* = {boundary:.5f}")
+
+    h0 = 0.18  # inside stability region
+    h1 = 0.24  # outside stability region
+
+    for h in [h0, h1]:
+        factor = milstein_step_factor_m2(lam, mu, h)
+        print(f"h={h:.3f}: E[G_h^2]={factor:.4f} (should be <1 for stability)")
+
+    plt.figure()
+    for h, label in [(h0, "stable (h0)"), (h1, "unstable (h1)")]:
+        t, msq = milstein_stability_sim(lam, mu, h, T_long=50.0,
+                                        n_paths=5000, seed=42)
+        plt.semilogy(t, msq, label=f"{label}, h={h:.3f}")
+    plt.xlabel("time")
+    plt.ylabel("E[X_n^2] (log scale)")
+    plt.title("Milstein mean-square stability for GBM (lam=-3, mu=sqrt(3))")
+    plt.grid(True, which="both", ls=":")
+    plt.legend()
+    plt.show()
+
+
+# 4. Asymptotic stability exploration (part iv)
+
+def demo_asymptotic_stability():
+    lam, mu = 0.5, np.sqrt(6.0)
+    print("Exploring asymptotic stability for Milstein (lam=1/2, mu=sqrt(6))")
+    hs = np.linspace(0.01, 0.4, 10)  # adjust grid as desired
+
+    growth_rates = []
+
+    for h in hs:
+        T_long = 100.0
+        t, msq = milstein_stability_sim(lam, mu, h, T_long=T_long,
+                                        n_paths=5000, seed=123)
+        # approximate exponential growth rate of mean-square:
+        # msq ~ exp(r * t) => r ≈ (log(msq_end) - log(msq_start))/T_long
+        r = (np.log(msq[-1]) - np.log(msq[0])) / T_long
+        growth_rates.append(r)
+        print(f"h={h:.3f}, approx growth rate r(h)={r:.4e}")
+
+    plt.figure()
+    plt.plot(hs, growth_rates, "o-")
+    plt.axhline(0.0, color="k", linestyle="--")
+    plt.xlabel("stepsize h")
+    plt.ylabel("approx growth rate r(h)")
+    plt.title("Estimated asymptotic stability boundary for Milstein")
+    plt.grid(True)
+    plt.show()
+
+
+# 5. Run everything
+
+if __name__ == "__main__":
+    # Parameters for convergence: (lam, mu) = (3, 1.5)
+    lam_conv, mu_conv = 3.0, 1.5
+    hs_conv = np.array([2.0**(-k) for k in range(1, 7)])
+
+    print("=== Euler–Maruyama convergence ===")
+    convergence_test(euler_maruyama, "Euler–Maruyama",
+                     lam_conv, mu_conv, T=1.0,
+                     hs=hs_conv, n_paths=50000)
+
+    print("=== Milstein convergence ===")
+    convergence_test(milstein, "Milstein",
+                     lam_conv, mu_conv, T=1.0,
+                     hs=hs_conv, n_paths=50000)
+
+    print("=== Milstein mean-square stability demo (part iii) ===")
+    demo_mean_square_stability()
+
+    print("=== Milstein asymptotic stability exploration (part iv) ===")
+    demo_asymptotic_stability()
